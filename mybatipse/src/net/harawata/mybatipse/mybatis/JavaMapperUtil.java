@@ -16,7 +16,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.eclipse.core.resources.ProjectScope;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.preferences.ConfigurationScope;
+import org.eclipse.core.runtime.preferences.DefaultScope;
+import org.eclipse.core.runtime.preferences.IScopeContext;
+import org.eclipse.core.runtime.preferences.InstanceScope;
+import org.eclipse.jdt.core.IAnnotatable;
 import org.eclipse.jdt.core.IAnnotation;
 import org.eclipse.jdt.core.ICompilationUnit;
 import org.eclipse.jdt.core.IJavaElement;
@@ -24,8 +30,11 @@ import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.core.ILocalVariable;
 import org.eclipse.jdt.core.IMemberValuePair;
 import org.eclipse.jdt.core.IMethod;
+import org.eclipse.jdt.core.ISourceRange;
 import org.eclipse.jdt.core.IType;
+import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.JavaModelException;
+import org.eclipse.jdt.core.Signature;
 import org.eclipse.jdt.core.compiler.CharOperation;
 import org.eclipse.jdt.core.dom.AST;
 import org.eclipse.jdt.core.dom.ASTParser;
@@ -37,23 +46,68 @@ import org.eclipse.jdt.core.dom.IMemberValuePairBinding;
 import org.eclipse.jdt.core.dom.IMethodBinding;
 import org.eclipse.jdt.core.dom.ITypeBinding;
 import org.eclipse.jdt.core.dom.MethodDeclaration;
+import org.eclipse.jdt.core.dom.SingleVariableDeclaration;
 import org.eclipse.jdt.core.dom.Type;
 import org.eclipse.jdt.core.dom.TypeDeclaration;
 
 import net.harawata.mybatipse.Activator;
 import net.harawata.mybatipse.MybatipseConstants;
+import net.harawata.mybatipse.bean.SupertypeHierarchyCache;
+import net.harawata.mybatipse.util.NameUtil;
 
 /**
  * @author Iwao AVE!
  */
 public class JavaMapperUtil
 {
+	public static String getAnnotationMemberValue(IAnnotation annotation, String memberName)
+	{
+		try
+		{
+			IMemberValuePair[] valuePairs = annotation.getMemberValuePairs();
+			for (IMemberValuePair valuePair : valuePairs)
+			{
+				if (memberName.equals(valuePair.getMemberName()))
+				{
+					return (String)valuePair.getValue();
+				}
+			}
+		}
+		catch (JavaModelException e)
+		{
+			Activator.log(Status.ERROR, "Failed to get member value pairs.", e);
+		}
+		return null;
+	}
+
+	public static IAnnotation getAnnotationAt(IAnnotatable annotatable, int offset)
+		throws JavaModelException
+	{
+		IAnnotation[] annotations = annotatable.getAnnotations();
+		for (IAnnotation annotation : annotations)
+		{
+			ISourceRange sourceRange = annotation.getSourceRange();
+			if (isInRange(sourceRange, offset))
+			{
+				return annotation;
+			}
+		}
+		return null;
+	}
+
+	private static boolean isInRange(ISourceRange sourceRange, int offset)
+	{
+		int start = sourceRange.getOffset();
+		int end = start + sourceRange.getLength();
+		return start <= offset && offset <= end;
+	}
+
 	public static void findMapperMethod(MapperMethodStore store, IJavaProject project,
 		String mapperFqn, MethodMatcher annotationFilter)
 	{
 		try
 		{
-			IType mapperType = project.findType(mapperFqn);
+			IType mapperType = project.findType(mapperFqn.replace('$', '.'));
 			if (mapperType == null || !mapperType.isInterface())
 				return;
 			if (mapperType.isBinary())
@@ -76,7 +130,7 @@ public class JavaMapperUtil
 	{
 		ICompilationUnit compilationUnit = (ICompilationUnit)mapperType
 			.getAncestor(IJavaElement.COMPILATION_UNIT);
-		ASTParser parser = ASTParser.newParser(AST.JLS4);
+		ASTParser parser = ASTParser.newParser(AST.JLS8);
 		parser.setKind(ASTParser.K_COMPILATION_UNIT);
 		parser.setSource(compilationUnit);
 		parser.setResolveBindings(true);
@@ -126,7 +180,7 @@ public class JavaMapperUtil
 			if (binding == null)
 				return false;
 
-			if (mapperFqn.equals(binding.getQualifiedName()))
+			if (mapperFqn.equals(binding.getBinaryName()))
 				nestLevel = 1;
 			else if (nestLevel > 0)
 				nestLevel++;
@@ -159,7 +213,9 @@ public class JavaMapperUtil
 			{
 				if (methodMatcher.matches(method))
 				{
-					methodStore.add(method);
+					@SuppressWarnings("unchecked")
+					List<SingleVariableDeclaration> params = node.parameters();
+					methodStore.add(method, params);
 				}
 			}
 			catch (JavaModelException e)
@@ -221,9 +277,37 @@ public class JavaMapperUtil
 		/**
 		 * Called when adding source method.
 		 */
-		void add(IMethodBinding method);
+		void add(IMethodBinding method, List<SingleVariableDeclaration> params);
 
 		boolean isEmpty();
+	}
+
+	public static class SingleMethodStore implements MapperMethodStore
+	{
+		private IMethod method;
+
+		public IMethod getMethod()
+		{
+			return this.method;
+		}
+
+		@Override
+		public void add(IMethod method)
+		{
+			this.method = method;
+		}
+
+		@Override
+		public void add(IMethodBinding method, List<SingleVariableDeclaration> params)
+		{
+			this.method = (IMethod)method.getJavaElement();
+		}
+
+		@Override
+		public boolean isEmpty()
+		{
+			return method == null;
+		}
 	}
 
 	public static class MethodNameStore implements MapperMethodStore
@@ -242,7 +326,7 @@ public class JavaMapperUtil
 		}
 
 		@Override
-		public void add(IMethodBinding method)
+		public void add(IMethodBinding method, List<SingleVariableDeclaration> params)
 		{
 			methodNames.add(method.getName());
 		}
@@ -254,8 +338,49 @@ public class JavaMapperUtil
 		}
 	}
 
+	public static class MethodReturnTypeStore implements MapperMethodStore
+	{
+		private String returnType = null;
+
+		public String getReturnType()
+		{
+			return returnType;
+		}
+
+		@Override
+		public void add(IMethod method)
+		{
+			try
+			{
+				returnType = method.getReturnType();
+			}
+			catch (JavaModelException e)
+			{
+				Activator.log(Status.ERROR,
+					"Failed to collect return type of method " + method.getElementName() + " in "
+						+ method.getDeclaringType().getFullyQualifiedName(),
+					e);
+			}
+		}
+
+		@Override
+		public void add(IMethodBinding method, List<SingleVariableDeclaration> params)
+		{
+			ITypeBinding binding = method.getReturnType();
+			returnType = binding.getQualifiedName();
+		}
+
+		@Override
+		public boolean isEmpty()
+		{
+			return returnType == null;
+		}
+	}
+
 	public static class MethodParametersStore implements MapperMethodStore
 	{
+		private IJavaProject project;
+
 		private boolean found;
 
 		private Map<String, String> paramMap = new HashMap<String, String>();
@@ -272,9 +397,11 @@ public class JavaMapperUtil
 			try
 			{
 				ILocalVariable[] parameters = method.getParameters();
+				boolean foundParamAnnotation = false;
 				for (int i = 0; i < parameters.length; i++)
 				{
-					String paramFqn = parameters[i].getElementName();
+					String paramFqn = Signature.toString(parameters[i].getTypeSignature());
+					foundParamAnnotation = false;
 					for (IAnnotation annotation : parameters[i].getAnnotations())
 					{
 						if (MybatipseConstants.ANNOTATION_PARAM.equals(annotation.getElementName()))
@@ -285,10 +412,21 @@ public class JavaMapperUtil
 								IMemberValuePair valuePair = valuePairs[0];
 								String paramValue = (String)valuePair.getValue();
 								paramMap.put(paramValue, paramFqn);
+								foundParamAnnotation = true;
 							}
 						}
 					}
+					if (!foundParamAnnotation && isParamAttrGenerated())
+					{
+						paramMap.put(parameters[i].getElementName(), paramFqn);
+					}
 					paramMap.put("param" + (i + 1), paramFqn);
+				}
+				if (parameters.length == 1 && !foundParamAnnotation)
+				{
+					// Statement has a sole unnamed parameter
+					paramMap.clear();
+					putSoleParam(Signature.toString(parameters[0].getTypeSignature()));
 				}
 			}
 			catch (JavaModelException e)
@@ -301,13 +439,15 @@ public class JavaMapperUtil
 		}
 
 		@Override
-		public void add(IMethodBinding method)
+		public void add(IMethodBinding method, List<SingleVariableDeclaration> params)
 		{
 			found = true;
-			ITypeBinding[] parameters = method.getParameterTypes();
-			for (int i = 0; i < parameters.length; i++)
+			ITypeBinding[] paramTypes = method.getParameterTypes();
+			boolean foundParamAnnotation = false;
+			for (int i = 0; i < paramTypes.length; i++)
 			{
-				String paramFqn = parameters[i].getQualifiedName();
+				String paramFqn = paramTypes[i].getQualifiedName();
+				foundParamAnnotation = false;
 				if (MybatipseConstants.TYPE_ROW_BOUNDS.equals(paramFqn))
 					continue;
 
@@ -323,10 +463,89 @@ public class JavaMapperUtil
 							IMemberValuePairBinding valuePairBinding = valuePairs[0];
 							String paramValue = (String)valuePairBinding.getValue();
 							paramMap.put(paramValue, paramFqn);
+							foundParamAnnotation = true;
 						}
 					}
 				}
+				if (!foundParamAnnotation && isParamAttrGenerated())
+				{
+					SingleVariableDeclaration param = params.get(i);
+					paramMap.put(param.getName().toString(), paramFqn);
+				}
 				paramMap.put("param" + (i + 1), paramFqn);
+			}
+			if (paramTypes.length == 1 && !foundParamAnnotation)
+			{
+				// Statement has a sole unnamed parameter
+				paramMap.clear();
+				putSoleParam(paramTypes[0].getQualifiedName());
+			}
+		}
+
+		private boolean isParamAttrGenerated()
+		{
+			IScopeContext[] contexts;
+			if (project != null)
+			{
+				contexts = new IScopeContext[]{
+					new ProjectScope(project.getProject()), InstanceScope.INSTANCE,
+					ConfigurationScope.INSTANCE, DefaultScope.INSTANCE
+				};
+			}
+			else
+			{
+				contexts = new IScopeContext[]{
+					InstanceScope.INSTANCE, ConfigurationScope.INSTANCE, DefaultScope.INSTANCE
+				};
+			}
+			for (int j = 0; j < contexts.length; ++j)
+			{
+				String value = contexts[j].getNode(JavaCore.PLUGIN_ID)
+					.get(JavaCore.COMPILER_CODEGEN_METHOD_PARAMETERS_ATTR, null);
+				if (value != null)
+				{
+					value = value.trim();
+					if (!value.isEmpty())
+						return "generate".equals(value.trim());
+				}
+			}
+			return false;
+		}
+
+		private void putSoleParam(String paramFqn)
+		{
+			try
+			{
+				if (NameUtil.isArray(paramFqn))
+				{
+					paramMap.put("array", paramFqn);
+					return;
+				}
+				else
+				{
+					String rawTypeFqn = NameUtil.stripTypeArguments(paramFqn);
+					if (!paramFqn.equals(rawTypeFqn))
+					{
+						// Parameterized type.
+						final IType rawType = project.findType(rawTypeFqn);
+						if (SupertypeHierarchyCache.getInstance().isMap(rawType))
+							return;
+
+						if (SupertypeHierarchyCache.getInstance().isList(rawType))
+							paramMap.put("list", paramFqn);
+
+						if (SupertypeHierarchyCache.getInstance().isCollection(rawType))
+						{
+							paramMap.put("collection", paramFqn);
+							return;
+						}
+					}
+				}
+				paramMap.put("_parameter", paramFqn);
+			}
+			catch (JavaModelException e)
+			{
+				Activator.log(Status.ERROR, "Error occurred while putting sole param.", e);
 			}
 		}
 
@@ -334,6 +553,12 @@ public class JavaMapperUtil
 		public boolean isEmpty()
 		{
 			return !found;
+		}
+
+		public MethodParametersStore(IJavaProject project)
+		{
+			super();
+			this.project = project;
 		}
 	}
 

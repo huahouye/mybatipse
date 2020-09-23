@@ -11,9 +11,12 @@
 
 package net.harawata.mybatipse.mybatis;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.Status;
@@ -33,8 +36,12 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 
 import net.harawata.mybatipse.Activator;
+import net.harawata.mybatipse.MybatipseConstants;
+import net.harawata.mybatipse.bean.SupertypeHierarchyCache;
 import net.harawata.mybatipse.mybatis.JavaMapperUtil.MethodNameMatcher;
 import net.harawata.mybatipse.mybatis.JavaMapperUtil.MethodParametersStore;
+import net.harawata.mybatipse.mybatis.JavaMapperUtil.MethodReturnTypeStore;
+import net.harawata.mybatipse.util.NameUtil;
 
 /**
  * @author Iwao AVE!
@@ -69,18 +76,36 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 				if (element == null || !(element instanceof IMethod))
 					return Collections.emptyList();
 
-				IAnnotation annotation = getAnnotationAt((IAnnotatable)element, offset);
+				IAnnotation annotation = JavaMapperUtil.getAnnotationAt((IAnnotatable)element, offset);
 				if (annotation == null)
 					return Collections.emptyList();
 
-				IMethod method = (IMethod)element;
+				final IJavaProject project = javaContext.getProject();
+				final IMethod method = (IMethod)element;
+				final String mapperFqn = method.getDeclaringType().getFullyQualifiedName();
 				if (isInlineStatementAnnotation(annotation))
 				{
-					return proposeStatementText(javaContext, unit, offset, annotation, method);
+					return proposeStatementText(project, unit, offset, annotation, method);
 				}
-				else if ("ResultMap".equals(annotation.getElementName()))
+				else
 				{
-					return proposeResultMap(javaContext, primaryType, offset, annotation);
+					String elementName = annotation.getElementName();
+					if ("ResultMap".equals(elementName))
+					{
+						return proposeResultMap(project, mapperFqn, offset, annotation);
+					}
+					else if ("Results".equals(elementName))
+					{
+						return proposeResults(project, mapperFqn, offset, annotation, method);
+					}
+					else if ("ConstructorArgs".equals(elementName))
+					{
+						return proposeConstructorArgs(project, mapperFqn, offset, annotation, method);
+					}
+					else if ("Options".equals(elementName) || "SelectKey".equals(elementName))
+					{
+						return proposeKeyProperty(project, mapperFqn, offset, annotation, method);
+					}
 				}
 			}
 			catch (JavaModelException e)
@@ -91,9 +116,122 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 		return Collections.emptyList();
 	}
 
-	private List<ICompletionProposal> proposeResultMap(
-		JavaContentAssistInvocationContext javaContext, IType primaryType, int offset,
-		IAnnotation annotation) throws JavaModelException
+	private List<ICompletionProposal> proposeConstructorArgs(final IJavaProject project,
+		final String mapperFqn, int offset, IAnnotation annotation, final IMethod method)
+		throws JavaModelException
+	{
+		final AnnotationParser parser = new AnnotationParser(annotation, offset);
+		String key = parser.getKey();
+		if ("resultMap".equals(key))
+		{
+			String matchString = parser.getValue();
+			return ProposalComputorHelper.proposeReference(project, mapperFqn, matchString,
+				offset - matchString.length(), parser.getValueLength(), "resultMap", null);
+		}
+		else if ("select".equals(key))
+		{
+			String matchString = parser.getValue();
+			return ProposalComputorHelper.proposeReference(project, mapperFqn, matchString,
+				offset - matchString.length(), parser.getValueLength(), "select",
+				method.getElementName());
+		}
+		return Collections.emptyList();
+	}
+
+	private List<ICompletionProposal> proposeKeyProperty(IJavaProject project, String mapperFqn,
+		int offset, IAnnotation annotation, IMethod method) throws JavaModelException
+	{
+		AnnotationParser parser = new AnnotationParser(annotation, offset);
+		if ("keyProperty".equals(parser.getKey()))
+		{
+			final MethodParametersStore methodStore = new MethodParametersStore(project);
+			JavaMapperUtil.findMapperMethod(methodStore, project, mapperFqn,
+				new MethodNameMatcher(method.getElementName(), true));
+			if (!methodStore.isEmpty())
+			{
+				Map<String, String> paramMap = methodStore.getParamMap();
+				if (paramMap.isEmpty())
+				{
+					return Collections.emptyList();
+				}
+				String actualParamType = null;
+				String paramType = null;
+				for (Entry<String, String> entry : paramMap.entrySet())
+				{
+					paramType = entry.getValue();
+					// only the first parameter for now
+					break;
+				}
+				if (paramType.indexOf('<') == -1)
+				{
+					actualParamType = paramType;
+				}
+				else
+				{
+					IType rawType = project.findType(NameUtil.stripTypeArguments(paramType));
+					if (SupertypeHierarchyCache.getInstance().isCollection(rawType))
+					{
+						List<String> typeParams = NameUtil.extractTypeParams(paramType);
+						if (typeParams.size() == 1)
+						{
+							actualParamType = typeParams.get(0);
+						}
+					}
+				}
+				if (actualParamType != null)
+				{
+					String matchString = String.valueOf(parser.getValue());
+					return ProposalComputorHelper.proposePropertyFor(project,
+						offset - matchString.length(), parser.getValueLength(), actualParamType, false, -1,
+						matchString);
+				}
+			}
+		}
+		return Collections.emptyList();
+	}
+
+	private List<ICompletionProposal> proposeResults(IJavaProject project, String mapperFqn,
+		int offset, IAnnotation annotation, IMethod method) throws JavaModelException
+	{
+		final List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
+		AnnotationParser parser = new AnnotationParser(annotation, offset);
+		String annotationAttrName = parser.getKey();
+		if ("property".equals(annotationAttrName))
+		{
+			proposeProperty(proposals, project, mapperFqn, method, offset, parser);
+		}
+		else if ("select".equals(annotationAttrName))
+		{
+			String matchString = parser.getValue();
+			proposals.addAll(ProposalComputorHelper.proposeReference(project, mapperFqn, matchString,
+				offset - matchString.length(), parser.getValueLength(), "select",
+				method.getElementName()));
+		}
+		return proposals;
+	}
+
+	private void proposeProperty(List<ICompletionProposal> proposals, IJavaProject project,
+		String mapperFqn, IMethod method, int offset, AnnotationParser parser)
+		throws JavaModelException
+	{
+		final MethodReturnTypeStore methodStore = new MethodReturnTypeStore();
+		JavaMapperUtil.findMapperMethod(methodStore, project, mapperFqn,
+			new MethodNameMatcher(method.getElementName(), true));
+		if (!methodStore.isEmpty())
+		{
+			String returnType = NameUtil.manageableReturnType(project, methodStore.getReturnType());
+			if (returnType != null)
+			{
+				String matchString = String.valueOf(parser.getValue());
+				proposals.addAll(
+					ProposalComputorHelper.proposePropertyFor(project, offset - matchString.length(),
+						parser.getValueLength(), returnType, false, -1, matchString));
+			}
+		}
+	}
+
+	private List<ICompletionProposal> proposeResultMap(IJavaProject project, String mapperFqn,
+		int offset, IAnnotation annotation) throws JavaModelException
 	{
 		String text = annotation.getSource();
 		// This can be null right after emptying the literal, for example.
@@ -101,16 +239,14 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 			return Collections.emptyList();
 		SimpleParser parser = new SimpleParser(text,
 			offset - annotation.getSourceRange().getOffset() - 1);
-		final IJavaProject project = javaContext.getProject();
 		String matchString = parser.getMatchString();
-		return ProposalComputorHelper.proposeReference(project, primaryType.getFullyQualifiedName(),
-			matchString, offset - matchString.length(), parser.getReplacementLength(), "resultMap",
-			null);
+		return ProposalComputorHelper.proposeReference(project, mapperFqn, matchString,
+			offset - matchString.length(), parser.getReplacementLength(), "resultMap", null);
 	}
 
-	private List<ICompletionProposal> proposeStatementText(
-		JavaContentAssistInvocationContext javaContext, ICompilationUnit unit, int offset,
-		IAnnotation annotation, IMethod method) throws JavaModelException
+	private List<ICompletionProposal> proposeStatementText(IJavaProject project,
+		ICompilationUnit unit, int offset, IAnnotation annotation, IMethod method)
+		throws JavaModelException
 	{
 		if (method.getParameters().length == 0)
 			return Collections.emptyList();
@@ -123,7 +259,6 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 			String matchString = parser.getMatchString();
 			offset -= matchString.length();
 			int length = parser.getReplacementLength();
-			final IJavaProject project = javaContext.getProject();
 			String proposalTarget = parser.getProposalTarget();
 			if (proposalTarget == null || proposalTarget.length() == 0)
 				return ProposalComputorHelper.proposeOptionName(offset, length, matchString);
@@ -135,14 +270,14 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 				if (primaryType == null || !primaryType.isInterface())
 					return Collections.emptyList();
 
-				final MethodParametersStore methodStore = new MethodParametersStore();
+				final MethodParametersStore methodStore = new MethodParametersStore(project);
 				String mapperFqn = primaryType.getFullyQualifiedName();
 				JavaMapperUtil.findMapperMethod(methodStore, project, mapperFqn,
 					new MethodNameMatcher(method.getElementName(), true));
 				if (!methodStore.isEmpty())
 				{
 					return ProposalComputorHelper.proposeParameters(project, offset, length,
-						methodStore.getParamMap(), true, matchString);
+						methodStore.getParamMap(), null, true, matchString);
 				}
 			}
 			else if ("jdbcType".equals(proposalTarget))
@@ -151,7 +286,8 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 				return ProposalComputorHelper.proposeJavaType(project, offset, length, true,
 					matchString);
 			else if ("typeHandler".equals(proposalTarget))
-				return ProposalComputorHelper.proposeTypeHandler(project, offset, length, matchString);
+				return ProposalComputorHelper.proposeAssignable(project, offset, length, matchString,
+					MybatipseConstants.TYPE_TYPE_HANDLER);
 		}
 		return Collections.emptyList();
 	}
@@ -160,34 +296,6 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 	{
 		String annotationName = annotation.getElementName();
 		return inlineStatementAnnotations.contains(annotationName);
-	}
-
-	private IAnnotation getAnnotationAt(IAnnotatable annotatable, int offset)
-	{
-		try
-		{
-			IAnnotation[] annotations = annotatable.getAnnotations();
-			for (IAnnotation annotation : annotations)
-			{
-				ISourceRange sourceRange = annotation.getSourceRange();
-				if (isInRange(sourceRange, offset))
-				{
-					return annotation;
-				}
-			}
-		}
-		catch (JavaModelException e)
-		{
-			Activator.log(Status.ERROR, e.getMessage(), e);
-		}
-		return null;
-	}
-
-	private boolean isInRange(ISourceRange sourceRange, int offset)
-	{
-		int start = sourceRange.getOffset();
-		int end = start + sourceRange.getLength();
-		return start <= offset && offset <= end;
 	}
 
 	public List<IContextInformation> computeContextInformation(
@@ -249,6 +357,108 @@ public class JavaCompletionProposalComputer implements IJavaCompletionProposalCo
 		public String getMatchString()
 		{
 			return matchString;
+		}
+	}
+
+	private class AnnotationParser
+	{
+		private IAnnotation annotation;
+
+		private int offset;
+
+		private StringBuilder key = new StringBuilder();
+
+		private StringBuilder value = new StringBuilder();
+
+		private int valueLength;
+
+		public AnnotationParser(IAnnotation annotation, int offset) throws JavaModelException
+		{
+			super();
+			this.annotation = annotation;
+			this.offset = offset;
+			parse();
+		}
+
+		private void parse() throws JavaModelException
+		{
+			ISourceRange annotationRange = annotation.getSourceRange();
+			int annotationOffset = annotationRange.getOffset();
+			String source = annotation.getSource();
+			int back;
+			// get the word under the cursor
+			for (back = offset - annotationOffset - 1; back > 0; back--)
+			{
+				char c = source.charAt(back);
+				if (c == ',' || c == '"')
+				{
+					break;
+				}
+				else if (Character.isWhitespace(c))
+				{
+					// ignore
+				}
+				else
+				{
+					value.insert(0, c);
+				}
+			}
+			valueLength += value.length();
+			// get the rest of the word that will be overwritten
+			for (int forward = offset - annotationOffset; forward < annotationRange
+				.getLength(); forward++)
+			{
+				char c = source.charAt(forward);
+				if (c == ',' || c == '"')
+				{
+					break;
+				}
+				else
+				{
+					valueLength++;
+				}
+			}
+			// move the pointer back to the dquote
+			for (; back > 0; back--)
+			{
+				if (source.charAt(back) == '"')
+				{
+					break;
+				}
+			}
+			// get the property name
+			for (; back > 0; back--)
+			{
+				char c = source.charAt(back);
+				// can handle simple cases only
+				if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+				{
+					key.insert(0, c);
+				}
+				else if (c == '(' || key.length() > 0)
+				{
+					break;
+				}
+				else
+				{
+					// ignore
+				}
+			}
+		}
+
+		public String getKey()
+		{
+			return key.toString();
+		}
+
+		public String getValue()
+		{
+			return value.toString();
+		}
+
+		public int getValueLength()
+		{
+			return valueLength;
 		}
 	}
 }

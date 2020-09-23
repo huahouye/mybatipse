@@ -49,7 +49,17 @@ public class MybatipseConstants
 
 	public static final String ANNOTATION_RESULTS = "org.apache.ibatis.annotations.Results";
 
+	public static final String ANNOTATION_RESULT = "org.apache.ibatis.annotations.Result";
+
 	public static final String ANNOTATION_PARAM = "org.apache.ibatis.annotations.Param";
+
+	public static final String ANNOTATION_RESULT_MAP = "org.apache.ibatis.annotations.ResultMap";
+
+	public static final String ANNOTATION_ONE = "org.apache.ibatis.annotations.One";
+
+	public static final String ANNOTATION_MANY = "org.apache.ibatis.annotations.Many";
+
+	public static final String ANNOTATION_MAP_KEY = "org.apache.ibatis.annotations.MapKey";
 
 	public static final List<String> STATEMENT_ANNOTATIONS = Arrays.asList(ANNOTATION_SELECT,
 		ANNOTATION_INSERT, ANNOTATION_UPDATE, ANNOTATION_DELETE, ANNOTATION_SELECT_PROVIDER,
@@ -66,6 +76,16 @@ public class MybatipseConstants
 	public static final String TYPE_OBJECT_FACTORY = "org.apache.ibatis.reflection.factory.ObjectFactory";
 
 	public static final String TYPE_OBJECT_WRAPPER_FACTORY = "org.apache.ibatis.reflection.wrapper.ObjectWrapperFactory";
+
+	public static final String TYPE_REFLECTOR_FACTORY = "org.apache.ibatis.reflection.ReflectorFactory";
+
+	public static final String TYPE_VFS = "org.apache.ibatis.io.VFS";
+
+	public static final String TYPE_LANGUAGE_DRIVER = "org.apache.ibatis.scripting.LanguageDriver";
+
+	public static final String GUICE_MYBATIS_MODULE = "org.mybatis.guice.MyBatisModule";
+
+	public static final String SPRING_SQL_SESSION_FACTORY_BEAN = "org.mybatis.spring.SqlSessionFactoryBean";
 
 	public static final IContentType mapperContentType;
 

@@ -14,13 +14,13 @@ package net.harawata.mybatipse.mybatis;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
 import javax.xml.xpath.XPathExpressionException;
 
-import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.jdt.core.Flags;
 import org.eclipse.jdt.core.IAnnotation;
@@ -33,6 +33,7 @@ import org.eclipse.jdt.core.compiler.CharOperation;
 import org.eclipse.jdt.core.dom.IAnnotationBinding;
 import org.eclipse.jdt.core.dom.IMemberValuePairBinding;
 import org.eclipse.jdt.core.dom.IMethodBinding;
+import org.eclipse.jdt.core.dom.SingleVariableDeclaration;
 import org.eclipse.jdt.core.search.IJavaSearchConstants;
 import org.eclipse.jdt.core.search.IJavaSearchScope;
 import org.eclipse.jdt.core.search.SearchEngine;
@@ -72,95 +73,83 @@ public class ProposalComputorHelper
 		"TINYINT", "UNDEFINED", "VARBINARY", "VARCHAR"
 	};
 
-	public static String[] settingNames = {
-		"autoMappingBehavior", "cacheEnabled", "proxyFactory", "lazyLoadingEnabled",
-		"aggressiveLazyLoading", "multipleResultSetsEnabled", "useColumnLabel", "useGeneratedKeys",
-		"defaultExecutorType", "defaultStatementTimeout", "mapUnderscoreToCamelCase",
-		"safeRowBoundsEnabled", "localCacheScope", "jdbcTypeForNull", "lazyLoadTriggerMethods",
-		"safeResultHandlerEnabled", "defaultScriptingLanguage", "callSettersOnNulls", "logPrefix",
-		"logImpl", "configurationFactory", "vfsImpl"
+	public static Map<String, List<String>> settings = new HashMap<String, List<String>>()
+	{
+		{
+			List<String> empty = Collections.emptyList();
+			put("autoMappingBehavior", Arrays.asList("NONE", "FULL", "PARTIAL"));
+			put("autoMappingUnknownColumnBehavior", Arrays.asList("WARNING", "FAILING", "NONE"));
+			put("cacheEnabled", Arrays.asList("false", "true"));
+			put("proxyFactory", Arrays.asList("CGLIB", "JAVASSIST"));
+			put("lazyLoadingEnabled", Arrays.asList("true", "false"));
+			put("aggressiveLazyLoading", Arrays.asList("false", "true"));
+			put("multipleResultSetsEnabled", Arrays.asList("false", "true"));
+			put("useColumnLabel", Arrays.asList("false", "true"));
+			put("useGeneratedKeys", Arrays.asList("true", "false"));
+			put("defaultExecutorType", Arrays.asList("REUSE", "BATCH", "SIMPLE"));
+			put("defaultStatementTimeout", empty);
+			put("defaultFetchSize", empty);
+			put("mapUnderscoreToCamelCase", Arrays.asList("true", "false"));
+			put("localCacheScope", Arrays.asList("STATEMENT", "SESSION"));
+			put("jdbcTypeForNull", Arrays.asList("NULL", "VARCHAR", "OTHER"));
+			put("lazyLoadTriggerMethods", Arrays.asList("equals,clone,hashCode,toString"));
+			put("safeRowBoundsEnabled", Arrays.asList("false", "true"));
+			put("safeResultHandlerEnabled", Arrays.asList("false", "true"));
+			put("defaultScriptingLanguage", empty);
+			put("callSettersOnNulls", Arrays.asList("true", "false"));
+			put("useActualParamName", Arrays.asList("false", "true"));
+			put("logPrefix", empty);
+			put("logImpl", Arrays.asList("SLF4J", "LOG4J", "LOG4J2", "JDK_LOGGING", "COMMONS_LOGGING",
+				"STDOUT_LOGGING", "NO_LOGGING"));
+			put("configurationFactory", empty);
+			put("vfsImpl", empty);
+			put("defaultEnumTypeHandler", empty);
+			put("returnInstanceForEmptyRow", Arrays.asList("true", "false"));
+			put("defaultResultSetType",
+				Arrays.asList("FORWARD_ONLY", "SCROLL_INSENSITIVE", "SCROLL_SENSITIVE"));
+		}
+
+		private static final long serialVersionUID = 1L;
 	};
 
 	public static List<ICompletionProposal> proposeReference(IJavaProject project,
 		String currentNamespace, String matchString, int start, int length, String targetElement,
 		String idToExclude)
 	{
-		Document mapperDoc = null;
-		IFile mapperFile = MapperNamespaceCache.getInstance().get(project, currentNamespace, null);
-		if (mapperFile != null)
-		{
-			mapperDoc = MybatipseXmlUtil.getMapperDocument(mapperFile);
-		}
-		return ProposalComputorHelper.proposeReference(project, mapperDoc, currentNamespace,
-			matchString, start, length, targetElement, null);
-	}
-
-	public static List<ICompletionProposal> proposeReference(IJavaProject project,
-		Document domDoc, String matchString, int start, int length, String targetElement,
-		String idToExclude)
-	{
-		return ProposalComputorHelper.proposeReference(project, domDoc, null, matchString, start,
-			length, targetElement, null);
-	}
-
-	private static List<ICompletionProposal> proposeReference(IJavaProject project,
-		Document domDoc, String currentNamespace, String matchString, int start, int length,
-		String targetElement, String idToExclude)
-	{
 		List<ICompletionProposal> results = new ArrayList<ICompletionProposal>();
 		try
 		{
 			final int lastDot = matchString.lastIndexOf('.');
-			final String namespacePart = lastDot == -1 ? "" : matchString.substring(0, lastDot);
+			final String namespace = lastDot == -1 ? currentNamespace
+				: matchString.substring(0, lastDot);
 			final String matchStr = matchString.substring(lastDot + 1);
 			final char[] matchChrs = matchStr.toCharArray();
 			int replacementStart = lastDot == -1 ? start : start + lastDot + 1;
 			int replacementLength = lastDot == -1 ? length : length - lastDot - 1;
 
-			if (currentNamespace == null)
-			{
-				currentNamespace = MybatipseXmlUtil.getNamespace(domDoc);
-			}
-
 			final String exclude = idToExclude != null && idToExclude.length() > 0
-				&& namespacePart.equals(currentNamespace) ? idToExclude : null;
+				&& namespace.equals(currentNamespace) ? idToExclude : null;
 
-			final Document xmlMapper;
-			if (namespacePart.length() > 0)
+			for (Document mapper : MybatipseXmlUtil.getMapperDocument(project, namespace))
 			{
-				IFile mapperFile = MapperNamespaceCache.getInstance().get(project, namespacePart, null);
-				xmlMapper = mapperFile == null ? null : MybatipseXmlUtil.getMapperDocument(mapperFile);
-			}
-			else if (domDoc != null)
-			{
-				xmlMapper = domDoc;
-			}
-			else
-			{
-				xmlMapper = null;
+				proposeXmlElements(results, mapper, targetElement, matchChrs, replacementStart,
+					replacementLength, exclude);
 			}
 
-			if (xmlMapper != null)
-			{
-				NodeList nodes = XpathUtil.xpathNodes(xmlMapper, "//" + targetElement + "/@id");
-				proposeXmlElements(results, nodes, matchChrs, replacementStart, replacementLength,
-					exclude);
-			}
-
-			proposeNamespaces(results, project, namespacePart, currentNamespace, matchChrs, start,
-				length);
+			proposeNamespaces(results, project, matchString, namespace, currentNamespace, matchChrs,
+				start, length);
 
 			if ("select".equals(targetElement))
 			{
 				proposeJavaSelect(results, project,
-					namespacePart.length() > 0 ? namespacePart : currentNamespace, matchStr,
-					replacementStart, replacementLength);
+					namespace.length() > 0 ? namespace : currentNamespace, matchStr, replacementStart,
+					replacementLength, exclude);
 			}
 			else if ("resultMap".equals(targetElement))
 			{
 				proposeJavaResultMap(results, project,
-					namespacePart.length() > 0 ? namespacePart : currentNamespace, matchStr,
-					replacementStart, replacementLength);
+					namespace.length() > 0 ? namespace : currentNamespace, matchStr, replacementStart,
+					replacementLength);
 			}
 		}
 		catch (XPathExpressionException e)
@@ -168,12 +157,13 @@ public class ProposalComputorHelper
 			Activator.log(Status.ERROR, e.getMessage(), e);
 		}
 		return results;
-
 	}
 
-	private static void proposeXmlElements(List<ICompletionProposal> results, NodeList nodes,
-		char[] matchChrs, int start, int length, String exclude)
+	private static void proposeXmlElements(List<ICompletionProposal> results, Document xmlMapper,
+		String targetElement, char[] matchChrs, int start, int length, String exclude)
+		throws XPathExpressionException
 	{
+		NodeList nodes = XpathUtil.xpathNodes(xmlMapper, "//" + targetElement + "/@id");
 		for (int j = 0; j < nodes.getLength(); j++)
 		{
 			String id = nodes.item(j).getNodeValue();
@@ -189,42 +179,48 @@ public class ProposalComputorHelper
 	}
 
 	private static void proposeNamespaces(List<ICompletionProposal> results, IJavaProject project,
-		String partialNamespace, String currentNamespace, char[] matchChrs, int start, int length)
+		String matchString, String partialNamespace, String currentNamespace, char[] matchChrs,
+		int start, int length)
 	{
 		for (String namespace : MapperNamespaceCache.getInstance()
 			.getCacheMap(project, null)
 			.keySet())
 		{
-			if (!namespace.equals(currentNamespace) && namespace.startsWith(partialNamespace)
-				&& !namespace.equals(partialNamespace))
+			if (namespace.equals(currentNamespace) || namespace.equals(partialNamespace))
+				continue;
+
+			final char[] simpleName = CharOperation.lastSegment(namespace.toCharArray(), '.');
+			if (namespace.startsWith(matchString)
+				|| (namespace.startsWith(partialNamespace)
+					&& CharOperation.camelCaseMatch(matchChrs, simpleName))
+				|| CharOperation.camelCaseMatch(matchString.toCharArray(), simpleName))
 			{
-				char[] simpleName = CharOperation.lastSegment(namespace.toCharArray(), '.');
-				if (matchChrs.length == 0 || CharOperation.camelCaseMatch(matchChrs, simpleName))
-				{
-					StringBuilder replacementStr = new StringBuilder().append(namespace).append('.');
-					int cursorPos = replacementStr.length();
-					String displayString = new StringBuilder().append(simpleName)
-						.append(" - ")
-						.append(namespace)
-						.toString();
-					results
-						.add(new JavaCompletionProposal(replacementStr.toString(), start, length, cursorPos,
-							Activator.getIcon("/icons/mybatis-ns.png"), displayString, null, null, 100));
-				}
+				StringBuilder replacementStr = new StringBuilder().append(namespace).append('.');
+				int cursorPos = replacementStr.length();
+				String displayString = new StringBuilder().append(simpleName)
+					.append(" - ")
+					.append(namespace)
+					.toString();
+				results
+					.add(new JavaCompletionProposal(replacementStr.toString(), start, length, cursorPos,
+						Activator.getIcon("/icons/mybatis-ns.png"), displayString, null, null, 100));
 			}
 		}
 	}
 
 	private static void proposeJavaSelect(List<ICompletionProposal> results, IJavaProject project,
-		String namespace, String matchString, int start, int length)
+		String namespace, String matchString, int start, int length, String idToExclude)
 	{
 		MethodNameStore methodStore = new MethodNameStore();
 		JavaMapperUtil.findMapperMethod(methodStore, project, namespace,
 			new HasSelectAnnotation(matchString, false));
 		for (String methodName : methodStore.getMethodNames())
 		{
-			results.add(new JavaCompletionProposal(methodName, start, length, methodName.length(),
-				Activator.getIcon(), methodName, null, null, 200));
+			if (idToExclude == null || idToExclude.length() == 0 || !idToExclude.equals(methodName))
+			{
+				results.add(new JavaCompletionProposal(methodName, start, length, methodName.length(),
+					Activator.getIcon(), methodName, null, null, 200));
+			}
 		}
 	}
 
@@ -269,7 +265,7 @@ public class ProposalComputorHelper
 			}
 
 			@Override
-			public void add(IMethodBinding method)
+			public void add(IMethodBinding method, List<SingleVariableDeclaration> params)
 			{
 				for (IAnnotationBinding annotation : method.getAnnotations())
 				{
@@ -310,13 +306,7 @@ public class ProposalComputorHelper
 		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
 		for (String option : options)
 		{
-			if (matchString.length() == 0
-				|| CharOperation.camelCaseMatch(matchString.toCharArray(), option.toCharArray()))
-			{
-				String replacementString = option + "=";
-				proposals.add(new CompletionProposal(replacementString, offset, length,
-					replacementString.length(), Activator.getIcon(), option, null, null));
-			}
+			addProposalIfMatch(proposals, matchString, option, option + "=", offset, length, option);
 		}
 		return proposals;
 	}
@@ -325,14 +315,37 @@ public class ProposalComputorHelper
 		String matchString)
 	{
 		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
-		for (String settingName : settingNames)
+		for (String settingName : settings.keySet())
 		{
-			if (matchString.length() == 0
-				|| CharOperation.camelCaseMatch(matchString.toCharArray(), settingName.toCharArray()))
-			{
-				proposals.add(new CompletionProposal(settingName, offset, length, settingName.length(),
-					Activator.getIcon(), null, null, null));
-			}
+			addProposalIfMatch(proposals, matchString, settingName, settingName, offset, length,
+				settingName);
+		}
+		return proposals;
+	}
+
+	public static List<ICompletionProposal> proposeSettingValue(IJavaProject project,
+		String settingName, int offset, int length, String matchString)
+	{
+		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
+		List<String> values = settings.get(settingName);
+		for (String value : values)
+		{
+			addProposalIfMatch(proposals, matchString, value, value, offset, length, value);
+		}
+		if ("vfsImpl".equals(settingName))
+		{
+			proposals.addAll(proposeImplementation(project, offset, length, matchString,
+				MybatipseConstants.TYPE_VFS));
+		}
+		else if ("defaultScriptingLanguage".equals(settingName))
+		{
+			proposals.addAll(proposeImplementation(project, offset, length, matchString,
+				MybatipseConstants.TYPE_LANGUAGE_DRIVER));
+		}
+		else if ("defaultEnumTypeHandler".equals(settingName))
+		{
+			proposals.addAll(proposeImplementation(project, offset, length, matchString,
+				MybatipseConstants.TYPE_TYPE_HANDLER));
 		}
 		return proposals;
 	}
@@ -343,12 +356,7 @@ public class ProposalComputorHelper
 		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
 		for (String jdbcType : jdbcTypes)
 		{
-			if (matchString.length() == 0
-				|| CharOperation.prefixEquals(matchString.toCharArray(), jdbcType.toCharArray(), false))
-			{
-				proposals.add(new CompletionProposal(jdbcType, offset, length, jdbcType.length(),
-					Activator.getIcon(), null, null, null));
-			}
+			addProposalIfMatch(proposals, matchString, jdbcType, jdbcType, offset, length, jdbcType);
 		}
 		return proposals;
 	}
@@ -359,8 +367,8 @@ public class ProposalComputorHelper
 		final List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
 		if (includeAlias)
 		{
-			Map<String, String> aliasMap = TypeAliasCache.getInstance().searchTypeAliases(project,
-				matchString);
+			Map<String, String> aliasMap = TypeAliasCache.getInstance()
+				.searchTypeAliases(project, matchString);
 			for (Entry<String, String> entry : aliasMap.entrySet())
 			{
 				String qualifiedName = entry.getKey();
@@ -405,46 +413,78 @@ public class ProposalComputorHelper
 
 	public static List<ICompletionProposal> proposeParameters(IJavaProject project,
 		final int offset, final int length, final Map<String, String> paramMap,
-		final boolean searchReadable, final String matchString)
+		final Map<String, String> additionalParams, final boolean searchReadable,
+		final String matchString)
 	{
-		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
-		if (paramMap.size() == 1)
+		final List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
+		if (paramMap == null || paramMap.size() == 0)
 		{
-			// If there is only one parameter with no @Param,
-			// properties should be directly referenced.
-			String paramType = paramMap.values().iterator().next();
-			proposals = proposePropertyFor(project, offset, length, paramType, searchReadable, -1,
-				matchString);
+			return proposals;
 		}
-		else if (paramMap.size() > 1)
+
+		final int dotPos = matchString.indexOf('.');
+		// Proposals for additional params.
+		if (additionalParams != null && !additionalParams.isEmpty())
 		{
-			int dotPos = matchString.indexOf('.');
 			if (dotPos == -1)
 			{
-				for (Entry<String, String> paramEntry : paramMap.entrySet())
-				{
-					String paramName = paramEntry.getKey();
-					if (matchString.length() == 0
-						|| CharOperation.camelCaseMatch(matchString.toCharArray(), paramName.toCharArray()))
-					{
-						String displayStr = paramName + " - " + paramEntry.getValue();
-						proposals.add(new CompletionProposal(paramName, offset, length, paramName.length(),
-							Activator.getIcon(), displayStr, null, null));
-					}
-				}
+				proposeParamName(proposals, offset, length, matchString, additionalParams);
 			}
 			else
 			{
-				String paramName = matchString.substring(0, dotPos);
-				String qualifiedName = paramMap.get(paramName);
-				if (qualifiedName != null)
-				{
-					proposals = proposePropertyFor(project, offset, length, qualifiedName, searchReadable,
-						dotPos, matchString);
-				}
+				proposeParamProperty(proposals, project, offset, length, searchReadable, matchString,
+					additionalParams, dotPos);
 			}
 		}
+
+		// Proposals for statement parameters.
+		String paramName = paramMap.keySet().iterator().next();
+		String paramType = paramMap.values().iterator().next();
+		if (paramMap.size() == 1 && "_parameter".equals(paramName))
+		{
+			// Sole parameter without @Param.
+			proposals.addAll(proposePropertyFor(project, offset, length, paramType, searchReadable,
+				-1, matchString));
+		}
+		else if (dotPos == -1)
+		{
+			proposeParamName(proposals, offset, length, matchString, paramMap);
+		}
+		else
+		{
+			proposeParamProperty(proposals, project, offset, length, searchReadable, matchString,
+				paramMap, dotPos);
+		}
 		return proposals;
+	}
+
+	private static void proposeParamProperty(final List<ICompletionProposal> proposals,
+		IJavaProject project, final int offset, final int length, final boolean searchReadable,
+		final String matchString, final Map<String, String> additionalParams, final int dotPos)
+	{
+		for (Entry<String, String> paramEntry : additionalParams.entrySet())
+		{
+			String paramName = paramEntry.getKey();
+			if (paramName.length() == dotPos && matchString.startsWith(paramName))
+			{
+				String paramType = paramEntry.getValue();
+				proposals.addAll(proposePropertyFor(project, offset, length, paramType, searchReadable,
+					paramName.length(), matchString));
+				break;
+			}
+		}
+	}
+
+	private static void proposeParamName(final List<ICompletionProposal> proposals,
+		final int offset, final int length, final String matchString,
+		final Map<String, String> additionalParams)
+	{
+		for (Entry<String, String> paramEntry : additionalParams.entrySet())
+		{
+			String paramName = paramEntry.getKey();
+			addProposalIfMatch(proposals, matchString, paramName, paramName, offset, length,
+				paramName + " - " + paramEntry.getValue());
+		}
 	}
 
 	public static void searchJavaType(String matchString, IJavaSearchScope scope,
@@ -475,32 +515,10 @@ public class ProposalComputorHelper
 			IJavaSearchConstants.WAIT_UNTIL_READY_TO_SEARCH, null);
 	}
 
-	public static List<ICompletionProposal> proposeTypeHandler(IJavaProject project,
-		final int start, final int length, String matchString)
+	public static List<ICompletionProposal> proposeAssignable(IJavaProject project,
+		final int start, final int length, String matchString, String supertypeFqn)
 	{
-		String interfaceFqn = MybatipseConstants.TYPE_TYPE_HANDLER;
-		return proposeImplementation(project, start, length, matchString, interfaceFqn);
-	}
-
-	public static List<ICompletionProposal> proposeCacheType(IJavaProject project,
-		final int start, final int length, String matchString)
-	{
-		String interfaceFqn = MybatipseConstants.TYPE_CACHE;
-		return proposeImplementation(project, start, length, matchString, interfaceFqn);
-	}
-
-	public static List<ICompletionProposal> proposeObjectFactory(IJavaProject project,
-		final int start, final int length, String matchString)
-	{
-		String interfaceFqn = MybatipseConstants.TYPE_OBJECT_FACTORY;
-		return proposeImplementation(project, start, length, matchString, interfaceFqn);
-	}
-
-	public static List<ICompletionProposal> proposeObjectWrapperFactory(IJavaProject project,
-		final int start, final int length, String matchString)
-	{
-		String interfaceFqn = MybatipseConstants.TYPE_OBJECT_WRAPPER_FACTORY;
-		return proposeImplementation(project, start, length, matchString, interfaceFqn);
+		return proposeImplementation(project, start, length, matchString, supertypeFqn);
 	}
 
 	private static List<ICompletionProposal> proposeImplementation(IJavaProject project,
@@ -582,6 +600,20 @@ public class ProposalComputorHelper
 		{
 			this.relevance = relevance;
 			return this;
+		}
+	}
+
+	private static void addProposalIfMatch(final List<ICompletionProposal> proposals,
+		final String matchString, String targetStr, String replacementStr, final int offset,
+		final int length, String displayStr)
+	{
+		if (targetStr == null || targetStr.length() == 0)
+			return;
+		if (matchString.length() == 0
+			|| CharOperation.camelCaseMatch(matchString.toCharArray(), targetStr.toCharArray()))
+		{
+			proposals.add(new CompletionProposal(replacementStr, offset, length,
+				replacementStr.length(), Activator.getIcon(), displayStr, null, null));
 		}
 	}
 

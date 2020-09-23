@@ -15,6 +15,14 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import org.eclipse.core.runtime.Status;
+import org.eclipse.jdt.core.IJavaProject;
+import org.eclipse.jdt.core.IType;
+import org.eclipse.jdt.core.JavaModelException;
+
+import net.harawata.mybatipse.Activator;
+import net.harawata.mybatipse.bean.SupertypeHierarchyCache;
+
 /**
  * @author Iwao AVE!
  */
@@ -40,6 +48,52 @@ public class NameUtil
 		}
 		typeFqn.append(simpleTypeName).toString();
 		return typeFqn.toString();
+	}
+
+	public static boolean isArray(String src)
+	{
+		return src.endsWith("[]");
+	}
+
+	public static String extractArrayComponentType(String src)
+	{
+		if (!isArray(src))
+		{
+			return src;
+		}
+		return src.substring(0, src.length() - 1);
+	}
+
+	public static String manageableReturnType(IJavaProject project, String declaredReturnType)
+	{
+		if ("void".equals(declaredReturnType))
+		{
+			return null;
+		}
+		else if (declaredReturnType.indexOf('<') == -1)
+		{
+			return declaredReturnType;
+		}
+		else
+		{
+			try
+			{
+				IType rawType = project.findType(NameUtil.stripTypeArguments(declaredReturnType));
+				if (SupertypeHierarchyCache.getInstance().isCollection(rawType))
+				{
+					List<String> typeParams = NameUtil.extractTypeParams(declaredReturnType);
+					if (typeParams.size() == 1)
+					{
+						return typeParams.get(0);
+					}
+				}
+			}
+			catch (JavaModelException e)
+			{
+				Activator.log(Status.ERROR, e.getMessage(), e);
+			}
+		}
+		return null;
 	}
 
 	public static String stripTypeArguments(String src)
@@ -84,7 +138,8 @@ public class NameUtil
 		String typeParam)
 	{
 		int typeParamIdx = typeParams.indexOf(typeParam);
-		return typeParamIdx == -1 ? typeParam : actualTypeParams.get(typeParamIdx);
+		return typeParamIdx == -1 || actualTypeParams.isEmpty() ? typeParam
+			: actualTypeParams.get(typeParamIdx);
 	}
 
 	private NameUtil()

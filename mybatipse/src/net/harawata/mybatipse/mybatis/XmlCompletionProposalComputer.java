@@ -13,10 +13,14 @@ package net.harawata.mybatipse.mybatis;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
@@ -35,6 +39,7 @@ import org.eclipse.jdt.core.search.SearchParticipant;
 import org.eclipse.jdt.core.search.SearchPattern;
 import org.eclipse.jdt.core.search.SearchRequestor;
 import org.eclipse.jdt.internal.core.PackageFragment;
+import org.eclipse.jdt.internal.ui.text.java.JavaCompletionProposal;
 import org.eclipse.jdt.ui.text.java.IJavaCompletionProposal;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
@@ -43,9 +48,9 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.wst.sse.core.internal.provisional.text.IStructuredDocumentRegion;
 import org.eclipse.wst.sse.core.internal.provisional.text.ITextRegion;
 import org.eclipse.wst.sse.core.internal.provisional.text.ITextRegionList;
-import org.eclipse.wst.sse.core.utils.StringUtils;
 import org.eclipse.wst.sse.ui.contentassist.CompletionProposalInvocationContext;
 import org.eclipse.wst.sse.ui.internal.contentassist.ContentAssistUtils;
+import org.eclipse.wst.xml.core.internal.provisional.document.IDOMDocument;
 import org.eclipse.wst.xml.core.internal.provisional.document.IDOMNode;
 import org.eclipse.wst.xml.core.internal.regions.DOMRegionContext;
 import org.eclipse.wst.xml.ui.internal.contentassist.ContentAssistRequest;
@@ -56,11 +61,14 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
 import net.harawata.mybatipse.Activator;
+import net.harawata.mybatipse.MybatipseConstants;
 import net.harawata.mybatipse.bean.BeanPropertyCache;
 import net.harawata.mybatipse.bean.BeanPropertyInfo;
+import net.harawata.mybatipse.bean.SupertypeHierarchyCache;
 import net.harawata.mybatipse.mybatis.JavaMapperUtil.MethodNameStore;
 import net.harawata.mybatipse.mybatis.JavaMapperUtil.MethodParametersStore;
 import net.harawata.mybatipse.mybatis.JavaMapperUtil.RejectStatementAnnotation;
+import net.harawata.mybatipse.util.NameUtil;
 import net.harawata.mybatipse.util.XpathUtil;
 
 /**
@@ -82,13 +90,16 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		Include,
 		Package,
 		TypeAlias,
+		JdbcType,
 		SelectId,
 		KeyProperty,
-		ParamProperty,
+		ForEachCollection,
 		ParamPropertyPartial,
 		ObjectFactory,
 		ObjectWrapperFactory,
-		SettingName
+		ReflectorFactory,
+		SettingName,
+		SettingValue
 	}
 
 	@Override
@@ -105,16 +116,12 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		if (DOMRegionContext.XML_CDATA_TEXT.equals(regionType))
 		{
 			Node parentNode = xmlnode.getParentNode();
-			Node statementNode = MybatipseXmlUtil.findEnclosingStatementNode(parentNode);
-			if (statementNode == null)
-				return null;
-
 			int offset = context.getInvocationOffset();
 			ITextViewer viewer = context.getViewer();
 			contentAssistRequest = new ContentAssistRequest(xmlnode, parentNode,
 				ContentAssistUtils.getStructuredDocumentRegion(viewer, offset), completionRegion,
 				offset, 0, matchString);
-			proposeStatementText(contentAssistRequest, statementNode);
+			proposeStatementText(contentAssistRequest, parentNode);
 		}
 		return contentAssistRequest;
 	}
@@ -144,14 +151,10 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 			generateResults(contentAssistRequest, offset, length, parentNode,
 				tagAttrs.getNamedItem("javaType"));
 
-		Node statementNode = MybatipseXmlUtil.findEnclosingStatementNode(parentNode);
-		if (statementNode == null)
-			return;
-		proposeStatementText(contentAssistRequest, statementNode);
+		proposeStatementText(contentAssistRequest, parentNode);
 	}
 
-	private void proposeStatementText(ContentAssistRequest contentAssistRequest,
-		Node statementNode)
+	private void proposeStatementText(ContentAssistRequest contentAssistRequest, Node parentNode)
 	{
 		int offset = contentAssistRequest.getReplacementBeginPosition();
 		String text = contentAssistRequest.getText();
@@ -170,7 +173,7 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 					ProposalComputorHelper.proposeOptionName(offset, length, matchString));
 			else if ("property".equals(proposalTarget))
 				addProposals(contentAssistRequest,
-					proposeParameter(project, offset, length, statementNode, true, matchString));
+					proposeParameter(project, offset, length, parentNode, true, matchString));
 			else if ("jdbcType".equals(proposalTarget))
 				addProposals(contentAssistRequest,
 					ProposalComputorHelper.proposeJdbcType(offset, length, matchString));
@@ -178,18 +181,19 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 				addProposals(contentAssistRequest,
 					ProposalComputorHelper.proposeJavaType(project, offset, length, true, matchString));
 			else if ("typeHandler".equals(proposalTarget))
-				addProposals(contentAssistRequest,
-					ProposalComputorHelper.proposeTypeHandler(project, offset, length, matchString));
+				addProposals(contentAssistRequest, ProposalComputorHelper.proposeAssignable(project,
+					offset, length, matchString, MybatipseConstants.TYPE_TYPE_HANDLER));
 		}
 	}
 
 	private List<ICompletionProposal> proposeParameter(IJavaProject project, final int offset,
-		final int length, Node statementNode, final boolean searchReadable,
-		final String matchString)
+		final int length, Node parentNode, final boolean searchReadable, final String matchString)
 	{
-		List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
+		final List<ICompletionProposal> proposals = new ArrayList<ICompletionProposal>();
+		final Node statementNode = MybatipseXmlUtil.findEnclosingStatementNode(parentNode);
 		if (statementNode == null)
 			return proposals;
+
 		String statementId = null;
 		String paramType = null;
 		NamedNodeMap statementAttrs = statementNode.getAttributes();
@@ -205,32 +209,180 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		if (statementId == null || statementId.length() == 0)
 			return proposals;
 
-		if (paramType != null)
+		try
 		{
-			String resolved = TypeAliasCache.getInstance().resolveAlias(project, paramType, null);
-			proposals = ProposalComputorHelper.proposePropertyFor(project, offset, length,
-				resolved != null ? resolved : paramType, searchReadable, -1, matchString);
-		}
-		else
-		{
-			try
+			// Look for the corresponding Java mapper method.
+			String mapperFqn = MybatipseXmlUtil.getNamespace(statementNode.getOwnerDocument());
+			final MethodParametersStore methodStore = new MethodParametersStore(project);
+			JavaMapperUtil.findMapperMethod(methodStore, project, mapperFqn,
+				new RejectStatementAnnotation(statementId, true));
+			if (methodStore.isEmpty())
 			{
-				final MethodParametersStore methodStore = new MethodParametersStore();
-				String mapperFqn = MybatipseXmlUtil.getNamespace(statementNode.getOwnerDocument());
-				JavaMapperUtil.findMapperMethod(methodStore, project, mapperFqn,
-					new RejectStatementAnnotation(statementId, true));
-				if (!methodStore.isEmpty())
+				// Couldn't find the Java method. See if paramType is specified.
+				if (paramType != null)
 				{
-					proposals = ProposalComputorHelper.proposeParameters(project, offset, length,
-						methodStore.getParamMap(), searchReadable, matchString);
+					String resolved = TypeAliasCache.getInstance().resolveAlias(project, paramType, null);
+					proposals.addAll(ProposalComputorHelper.proposePropertyFor(project, offset, length,
+						resolved != null ? resolved : paramType, searchReadable, -1, matchString));
 				}
 			}
-			catch (XPathExpressionException e)
+			else
 			{
-				Activator.log(Status.ERROR, e.getMessage(), e);
+				final Map<String, String> additionalParams = new LinkedHashMap<String, String>();
+				// parse foreach elements
+				parseForeachNodes(project,
+					XpathUtil.xpathNodes(parentNode, "ancestor-or-self::foreach"),
+					methodStore.getParamMap(), additionalParams);
+				// collect bind parameters
+				NodeList bindNames = XpathUtil.xpathNodes(statementNode, "bind/@name");
+				for (int i = 0; i < bindNames.getLength(); i++)
+				{
+					String bindName = bindNames.item(i).getNodeValue();
+					additionalParams.put(bindName, "java.lang.Object");
+				}
+				proposals.addAll(ProposalComputorHelper.proposeParameters(project, offset, length,
+					methodStore.getParamMap(), additionalParams, searchReadable, matchString));
 			}
 		}
+		catch (XPathExpressionException e)
+		{
+			Activator.log(Status.ERROR, e.getMessage(), e);
+		}
+		catch (JavaModelException e)
+		{
+			Activator.log(Status.ERROR, e.getMessage(), e);
+		}
 		return proposals;
+	}
+
+	private void parseForeachNodes(IJavaProject project, NodeList foreachNodes,
+		Map<String, String> paramMap, Map<String, String> additionalParams)
+		throws XPathExpressionException, JavaModelException
+	{
+		Map<String, String> map = new LinkedHashMap<String, String>();
+		for (int i = 0; i < foreachNodes.getLength(); i++)
+		{
+			Node foreachNode = foreachNodes.item(i);
+			String collection = XpathUtil.xpathString(foreachNode, "@collection");
+			String item = XpathUtil.xpathString(foreachNode, "@item");
+			String index = XpathUtil.xpathString(foreachNode, "@index");
+			// Is collection a variable from outer foreach?
+			String collectionFqn = resolveCollectionFqn(project, map, collection);
+			if (collectionFqn == null)
+			{
+				// Is collection a statement parameter?
+				collectionFqn = resolveCollectionFqn(project, paramMap, collection);
+			}
+			if (collectionFqn == null)
+			{
+				// Is it a parameter property?
+				for (String paramFqn : paramMap.values())
+				{
+					Collection<String> fieldFqns = BeanPropertyCache
+						.searchFields(project, paramFqn, collection, true, -1, true)
+						.values();
+					if (!fieldFqns.isEmpty())
+					{
+						collectionFqn = fieldFqns.iterator().next();
+					}
+				}
+			}
+			if (collectionFqn != null)
+			{
+				putItemAndIndex(project, map, collectionFqn, item, index);
+			}
+		}
+		// reverse order of the proposals
+		ListIterator<Entry<String, String>> iter = new ArrayList<Entry<String, String>>(
+			map.entrySet()).listIterator(map.size());
+		while (iter.hasPrevious())
+		{
+			Entry<String, String> entry = iter.previous();
+			additionalParams.put(entry.getKey(), entry.getValue());
+		}
+	}
+
+	private String resolveCollectionFqn(IJavaProject project,
+		final Map<String, String> foreachParams, String collection)
+	{
+		String collectionFqn = null;
+		for (Entry<String, String> param : foreachParams.entrySet())
+		{
+			String paramName = param.getKey();
+			String paramFqn = param.getValue();
+			if (paramName.equals(collection))
+			{
+				collectionFqn = paramFqn;
+			}
+			else if (collection.startsWith(paramName + "."))
+			{
+				Collection<String> fieldFqns = BeanPropertyCache
+					.searchFields(project, paramFqn, collection, true, paramName.length(), false)
+					.values();
+				if (!fieldFqns.isEmpty())
+				{
+					collectionFqn = fieldFqns.iterator().next();
+				}
+			}
+		}
+		return collectionFqn;
+	}
+
+	private void putItemAndIndex(IJavaProject project, Map<String, String> foreachParams,
+		String collectionFqn, String item, String index) throws JavaModelException
+	{
+		if (NameUtil.isArray(collectionFqn))
+		{
+			foreachParams.put(index, "int");
+			foreachParams.put(item, collectionFqn.substring(0, collectionFqn.length() - 2));
+			return;
+		}
+		String rawTypeFqn = NameUtil.stripTypeArguments(collectionFqn);
+		if (rawTypeFqn.equals(collectionFqn))
+		{
+			return;
+		}
+		IType rawType = project.findType(rawTypeFqn);
+		if (SupertypeHierarchyCache.getInstance().isCollection(rawType))
+		{
+			List<String> typeParams = NameUtil.extractTypeParams(collectionFqn);
+			if (typeParams.size() == 1)
+			{
+				// Only a Collection with one type param is supported for now.
+				// Check if it's a collection of Map.Entry.
+				String typeParam = typeParams.get(0);
+				String typeParamRawTypeFqn = NameUtil.stripTypeArguments(typeParam);
+				if (!typeParamRawTypeFqn.equals(typeParam))
+				{
+					IType typeParamRawType = project.findType(typeParamRawTypeFqn);
+					if (SupertypeHierarchyCache.getInstance()
+						.isSubtype(typeParamRawType, "java.util.Map.Entry"))
+					{
+						putMapItemAndIndex(foreachParams, item, index,
+							NameUtil.extractTypeParams(typeParam));
+						return;
+					}
+				}
+				foreachParams.put(index, "int");
+				foreachParams.put(item, typeParam);
+				return;
+			}
+		}
+		if (SupertypeHierarchyCache.getInstance().isMap(rawType))
+		{
+			putMapItemAndIndex(foreachParams, item, index, NameUtil.extractTypeParams(collectionFqn));
+		}
+	}
+
+	private void putMapItemAndIndex(Map<String, String> foreachParams, String item, String index,
+		List<String> typeParams)
+	{
+		if (typeParams.size() == 2)
+		{
+			// Only a Map/Entry with 2 type params is supported for now.
+			foreachParams.put(index, typeParams.get(0));
+			foreachParams.put(item, typeParams.get(1));
+		}
 	}
 
 	private void generateResults(ContentAssistRequest contentAssistRequest, int offset,
@@ -313,28 +465,50 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		}
 
 		String currentValue = null;
-		if (contentAssistRequest.getRegion().getType() == DOMRegionContext.XML_TAG_ATTRIBUTE_VALUE)
-			currentValue = contentAssistRequest.getText();
-		else
-			currentValue = "";
-
-		String matchString = null;
-		int matchStrLen = contentAssistRequest.getMatchString().length();
+		String matchString = contentAssistRequest.getMatchString();
 		int start = contentAssistRequest.getReplacementBeginPosition();
-		int length = contentAssistRequest.getReplacementLength();
-		if (currentValue.length() > StringUtils.strip(currentValue).length()
-			&& (currentValue.startsWith("\"") || currentValue.startsWith("'")) && matchStrLen > 0)
+		if (contentAssistRequest.getRegion().getType() == DOMRegionContext.XML_TAG_ATTRIBUTE_VALUE)
 		{
-			// Value is surrounded by (double) quotes.
-			matchString = currentValue.substring(1, matchStrLen);
-			start++;
-			length = currentValue.length() - 2;
-			currentValue = currentValue.substring(1, length + 1);
+			currentValue = contentAssistRequest.getText();
+			int valueStart = 0;
+			int valueEnd = currentValue.length();
+			// Avoid deleting the next line when there is no closing quote.
+			int newLine = currentValue.indexOf('\r');
+			if (newLine == -1)
+			{
+				newLine = currentValue.indexOf('\n');
+			}
+			if (newLine > -1)
+			{
+				// No end quote: attr="value[cursor]>
+				valueEnd = currentValue.lastIndexOf('>', newLine);
+				if (valueEnd == -1)
+					valueEnd = newLine;
+			}
+			char firstChar = currentValue.charAt(0);
+			if (firstChar == '"' || firstChar == '\'')
+			{
+				valueStart = 1;
+				matchString = matchString.substring(1, matchString.length());
+				start++;
+			}
+			char lastChar = currentValue.charAt(valueEnd - 1);
+			if (valueStart == 1 && valueStart < valueEnd && firstChar == lastChar)
+			{
+				valueEnd--;
+			}
+			currentValue = currentValue.substring(valueStart, valueEnd);
+			if (matchString.length() > currentValue.length())
+			{
+				// Cursor after the end quote: attr="value"[cursor]>
+				return;
+			}
 		}
 		else
 		{
-			matchString = currentValue.substring(0, matchStrLen);
+			currentValue = "";
 		}
+		int length = currentValue.length();
 
 		IJavaProject project = getJavaProject(contentAssistRequest);
 		try
@@ -352,28 +526,41 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 					addProposals(contentAssistRequest,
 						ProposalComputorHelper.proposeJavaType(project, start, length, true, matchString));
 					break;
+				case JdbcType:
+					addProposals(contentAssistRequest,
+						ProposalComputorHelper.proposeJdbcType(start, length, matchString));
+					break;
 				case ResultProperty:
 					proposeProperty(contentAssistRequest, matchString, start, length, node);
 					break;
 				case TypeHandlerType:
-					addProposals(contentAssistRequest,
-						ProposalComputorHelper.proposeTypeHandler(project, start, length, matchString));
+					addProposals(contentAssistRequest, ProposalComputorHelper.proposeAssignable(project,
+						start, length, matchString, MybatipseConstants.TYPE_TYPE_HANDLER));
 					break;
 				case CacheType:
-					addProposals(contentAssistRequest,
-						ProposalComputorHelper.proposeCacheType(project, start, length, matchString));
+					addProposals(contentAssistRequest, ProposalComputorHelper.proposeAssignable(project,
+						start, length, matchString, MybatipseConstants.TYPE_CACHE));
 					break;
 				case SettingName:
 					addProposals(contentAssistRequest,
 						ProposalComputorHelper.proposeSettingName(start, length, matchString));
 					break;
+				case SettingValue:
+					String settingName = XpathUtil.xpathString(node, "@name");
+					addProposals(contentAssistRequest, ProposalComputorHelper.proposeSettingValue(project,
+						settingName, start, length, matchString));
+					break;
 				case ObjectFactory:
-					addProposals(contentAssistRequest,
-						ProposalComputorHelper.proposeObjectFactory(project, start, length, matchString));
+					addProposals(contentAssistRequest, ProposalComputorHelper.proposeAssignable(project,
+						start, length, matchString, MybatipseConstants.TYPE_OBJECT_FACTORY));
 					break;
 				case ObjectWrapperFactory:
-					addProposals(contentAssistRequest, ProposalComputorHelper
-						.proposeObjectWrapperFactory(project, start, length, matchString));
+					addProposals(contentAssistRequest, ProposalComputorHelper.proposeAssignable(project,
+						start, length, matchString, MybatipseConstants.TYPE_OBJECT_WRAPPER_FACTORY));
+					break;
+				case ReflectorFactory:
+					addProposals(contentAssistRequest, ProposalComputorHelper.proposeAssignable(project,
+						start, length, matchString, MybatipseConstants.TYPE_REFLECTOR_FACTORY));
 					break;
 				case StatementId:
 					proposeStatementId(contentAssistRequest, project, matchString, start, length, node);
@@ -383,35 +570,36 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 					break;
 				case ResultMap:
 					String ownId = "resultMap".equals(tagName) && "extends".equals(attributeName)
-						? XpathUtil.xpathString(node, "@id") : null;
+						? XpathUtil.xpathString(node, "@id")
+						: null;
 					addProposals(contentAssistRequest, proposeResultMapReference(project,
 						node.getOwnerDocument(), start, currentValue, matchString.length(), ownId));
 					break;
 				case Include:
-					addProposals(contentAssistRequest, ProposalComputorHelper.proposeReference(project,
-						node.getOwnerDocument(), matchString, start, length, "sql", null));
+					addProposals(contentAssistRequest,
+						ProposalComputorHelper.proposeReference(project,
+							MybatipseXmlUtil.getNamespace(node.getOwnerDocument()), matchString, start,
+							length, "sql", null));
 					break;
 				case SelectId:
-					addProposals(contentAssistRequest, ProposalComputorHelper.proposeReference(project,
-						node.getOwnerDocument(), matchString, start, length, "select", null));
+					addProposals(contentAssistRequest,
+						ProposalComputorHelper.proposeReference(project,
+							MybatipseXmlUtil.getNamespace(node.getOwnerDocument()), matchString, start,
+							length, "select", null));
 					break;
 				case KeyProperty:
-					String nodeName = node.getNodeName();
-					Node statementNode = "update".equals(nodeName) || "insert".equals(nodeName) ? node
-						: MybatipseXmlUtil.findEnclosingStatementNode(node.getParentNode());
 					addProposals(contentAssistRequest,
-						proposeParameter(project, start, length, statementNode, false, matchString));
+						proposeParameter(project, start, length, node, false, matchString));
 					break;
-				case ParamProperty:
-					addProposals(contentAssistRequest, proposeParameter(project, start, length,
-						MybatipseXmlUtil.findEnclosingStatementNode(node), true, matchString));
+				case ForEachCollection:
+					addProposals(contentAssistRequest,
+						proposeParameter(project, start, length, node.getParentNode(), true, matchString));
 					break;
 				case ParamPropertyPartial:
 					AttrTextParser parser = new AttrTextParser(currentValue, matchString.length());
 					addProposals(contentAssistRequest,
 						proposeParameter(project, start + parser.getMatchStringStart(),
-							parser.getReplacementLength(),
-							MybatipseXmlUtil.findEnclosingStatementNode(node.getParentNode()), true,
+							parser.getReplacementLength(), node.getParentNode(), true,
 							parser.getMatchString()));
 					break;
 				default:
@@ -434,8 +622,9 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		int newStart = start + offsetInCurrentValue - newMatchString.length();
 		int newLength = currentValue.length() - (offsetInCurrentValue - newMatchString.length())
 			- (rightComma > -1 ? currentValue.length() - rightComma : 0);
-		return ProposalComputorHelper.proposeReference(project, domDoc, newMatchString, newStart,
-			newLength, "resultMap", exclude);
+		return ProposalComputorHelper.proposeReference(project,
+			MybatipseXmlUtil.getNamespace(domDoc), newMatchString, newStart, newLength, "resultMap",
+			exclude);
 	}
 
 	private void proposeMapperNamespace(ContentAssistRequest contentAssistRequest,
@@ -456,10 +645,23 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		String qualifiedName = MybatipseXmlUtil.getNamespace(node.getOwnerDocument());
 		JavaMapperUtil.findMapperMethod(methodStore, project, qualifiedName,
 			new RejectStatementAnnotation(matchString, false));
+		// Collect IDs that are already declared in the XML mapper(s). #87
+		List<String> existingIds = new ArrayList<>();
+		for (IDOMDocument xmlMapper : MybatipseXmlUtil.getMapperDocument(project, qualifiedName))
+		{
+			NodeList idNodes = XpathUtil.xpathNodes(xmlMapper,
+				"//select/@id|//insert/@id|//update/@id|//delete/@id");
+			for (int i = 0; i < idNodes.getLength(); i++)
+			{
+				existingIds.add(idNodes.item(i).getNodeValue());
+			}
+		}
 		for (String methodName : methodStore.getMethodNames())
 		{
-			results.add(new CompletionProposal(methodName, start, length, methodName.length(),
-				Activator.getIcon(), methodName, null, null));
+			boolean idExists = existingIds.contains(methodName);
+			results.add(new JavaCompletionProposal(methodName, start, length,
+				Activator.getIcon(idExists ? "/icons/mybatis-alias.png" : "/icons/mybatis.png"),
+				methodName, idExists ? 100 : 200));
 		}
 		addProposals(contentAssistRequest, results);
 	}
@@ -549,13 +751,19 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 			return ProposalType.CacheType;
 		else if ("name".equals(attr) && "setting".equals(tag))
 			return ProposalType.SettingName;
+		else if ("value".equals(attr) && "setting".equals(tag))
+			return ProposalType.SettingValue;
 		else if ("type".equals(attr) && "objectFactory".equals(tag))
 			return ProposalType.ObjectFactory;
 		else if ("type".equals(attr) && "objectWrapperFactory".equals(tag))
 			return ProposalType.ObjectWrapperFactory;
+		else if ("type".equals(attr) && "reflectorFactory".equals(tag))
+			return ProposalType.ReflectorFactory;
 		else if ("type".equals(attr) || "resultType".equals(attr) || "parameterType".equals(attr)
 			|| "ofType".equals(attr) || "javaType".equals(attr))
 			return ProposalType.ResultType;
+		else if ("jdbcType".equals(attr))
+			return ProposalType.JdbcType;
 		else if ("property".equals(attr))
 			return ProposalType.ResultProperty;
 		else if ("package".equals(tag) && "name".equals(attr))
@@ -571,7 +779,7 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 		else if ("keyProperty".equals(attr))
 			return ProposalType.KeyProperty;
 		else if ("collection".equals(attr))
-			return ProposalType.ParamProperty;
+			return ProposalType.ForEachCollection;
 		else if ("test".equals(attr) || ("bind".equals(tag) && "value".equals(attr)))
 			return ProposalType.ParamPropertyPartial;
 		else if ("id".equals(attr) && ("select".equals(tag) || "update".equals(tag)
@@ -607,7 +815,7 @@ public class XmlCompletionProposalComputer extends DefaultXMLCompletionProposalC
 				if (diff != 0)
 					return diff;
 			}
-			return p1.getDisplayString().compareToIgnoreCase(p2.getDisplayString());
+			return 0;
 		}
 	}
 
